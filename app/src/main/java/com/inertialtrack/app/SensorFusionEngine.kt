@@ -4,9 +4,11 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.pow
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 class SensorFusionEngine(private val sensorManager: SensorManager) : SensorEventListener {
 
@@ -34,12 +36,27 @@ class SensorFusionEngine(private val sensorManager: SensorManager) : SensorEvent
     // Reference Barometric Pressure at GPS lock
     private var referencePressure: Float? = null
 
-    // Filter & Velocity Tracking
-    private var lastTimestamp: Long = 0L
-    private val velocityEarth = FloatArray(3) // [Vx, Vy, Vz]
-    private val filteredAccelEarth = FloatArray(3)
+    // --- Velocity integration state ---
+    private var lastAccelTimestamp: Long = 0L
+    private val velocityEarth = DoubleArray(3) // [Vx_east, Vy_north, Vz_up] in m/s
+    private val positionEarth = DoubleArray(3) // accumulated [east, north, up] in meters
+    private var stationaryCounter = 0
+    private val ZUPT_THRESHOLD = 0.25f   // m/s^2 below which we consider "stationary"
+    private val ZUPT_SAMPLES = 12        // consecutive quiet samples to trigger ZUPT
+    private val ACCEL_THRESHOLD = 0.08f  // m/s^2 dead zone for noise floor
 
-    // Default step size in meters
+    // --- Accelerometer-based step detection fallback ---
+    private var hasHardwareStepDetector = false
+    private var accelMagnitudeHistory = FloatArray(20) // ring buffer
+    private var accelHistoryIdx = 0
+    private var accelHistoryFilled = false
+    private var lastStepTimestamp: Long = 0L
+    private val MIN_STEP_INTERVAL_NS = 250_000_000L // 250ms minimum between steps
+    private var peakDetected = false
+    private val STEP_PEAK_THRESHOLD = 11.5f  // m/s^2 magnitude peak (gravity ~9.81)
+    private val STEP_VALLEY_THRESHOLD = 8.5f // m/s^2 magnitude valley
+
+    // Step size in meters
     private val defaultStepLength = 0.72
 
     fun setTelemetryListener(listener: TelemetryListener?) {
@@ -65,11 +82,17 @@ class SensorFusionEngine(private val sensorManager: SensorManager) : SensorEvent
             totalDistance = 0.0,
             currentSpeed = 0.0f
         )
-        // Reset velocity & pressure baseline
-        velocityEarth[0] = 0f
-        velocityEarth[1] = 0f
-        velocityEarth[2] = 0f
+        // Reset integration state
+        velocityEarth[0] = 0.0; velocityEarth[1] = 0.0; velocityEarth[2] = 0.0
+        positionEarth[0] = 0.0; positionEarth[1] = 0.0; positionEarth[2] = 0.0
+        lastAccelTimestamp = 0L
+        stationaryCounter = 0
         referencePressure = null
+        // Reset step detection
+        accelHistoryIdx = 0
+        accelHistoryFilled = false
+        lastStepTimestamp = 0L
+        peakDetected = false
         notifyUpdate()
     }
 
@@ -77,21 +100,33 @@ class SensorFusionEngine(private val sensorManager: SensorManager) : SensorEvent
         if (isTracking) return
         isTracking = true
 
+        // Rotation sensor (best available)
         val rotSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
             ?: sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
+
+        // Linear acceleration (gravity-compensated) — preferred for integration
         val linearAccelSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
-            ?: sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        val stepDetectorSensor = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
-        val pressureSensor = sensorManager.getDefaultSensor(Sensor.TYPE_PRESSURE)
-        val magSensor = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+
+        // Raw accelerometer — always needed for orientation fallback + step detection fallback
         val accelSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
+        // Step detector (hardware)
+        val stepDetectorSensor = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
+        hasHardwareStepDetector = (stepDetectorSensor != null)
+
+        // Barometer
+        val pressureSensor = sensorManager.getDefaultSensor(Sensor.TYPE_PRESSURE)
+
+        // Magnetometer for orientation fallback
+        val magSensor = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+
+        // Register sensors — no double-registration
         rotSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         linearAccelSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+        accelSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         stepDetectorSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST) }
         pressureSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
         magSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
-        accelSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
 
         currentData = currentData.copy(trackingState = TrackingState.SENSOR_TRACKING)
         notifyUpdate()
@@ -116,9 +151,10 @@ class SensorFusionEngine(private val sensorManager: SensorManager) : SensorEvent
             stepCount = 0,
             totalDistance = 0.0
         )
-        velocityEarth[0] = 0f
-        velocityEarth[1] = 0f
-        velocityEarth[2] = 0f
+        velocityEarth[0] = 0.0; velocityEarth[1] = 0.0; velocityEarth[2] = 0.0
+        positionEarth[0] = 0.0; positionEarth[1] = 0.0; positionEarth[2] = 0.0
+        stationaryCounter = 0
+        lastAccelTimestamp = 0L
         notifyUpdate()
     }
 
@@ -135,6 +171,10 @@ class SensorFusionEngine(private val sensorManager: SensorManager) : SensorEvent
                 System.arraycopy(event.values, 0, accelerometerReading, 0, 3)
                 hasAccel = true
                 if (!hasRotationVector) updateOrientationFallback()
+                // Fallback step detection from raw accel if no hardware step detector
+                if (!hasHardwareStepDetector) {
+                    detectStepFromAccelerometer(event.timestamp)
+                }
             }
             Sensor.TYPE_MAGNETIC_FIELD -> {
                 System.arraycopy(event.values, 0, magnetometerReading, 0, 3)
@@ -153,33 +193,25 @@ class SensorFusionEngine(private val sensorManager: SensorManager) : SensorEvent
         }
     }
 
+    // ========== Orientation ==========
+
     private fun updateOrientation() {
         SensorManager.getRotationMatrixFromVector(rotationMatrix, rotationVectorReading)
         SensorManager.getOrientation(rotationMatrix, orientationAngles)
 
-        // Convert azimuth (rad) to heading degrees [0..360)
         var yawDeg = Math.toDegrees(orientationAngles[0].toDouble()).toFloat()
         if (yawDeg < 0) yawDeg += 360f
 
         val pitchDeg = Math.toDegrees(orientationAngles[1].toDouble()).toFloat()
         val rollDeg = Math.toDegrees(orientationAngles[2].toDouble()).toFloat()
 
-        currentData = currentData.copy(
-            yaw = yawDeg,
-            pitch = pitchDeg,
-            roll = rollDeg
-        )
+        currentData = currentData.copy(yaw = yawDeg, pitch = pitchDeg, roll = rollDeg)
         notifyUpdate()
     }
 
     private fun updateOrientationFallback() {
         if (!hasAccel || !hasMag) return
-        val success = SensorManager.getRotationMatrix(
-            rotationMatrix,
-            null,
-            accelerometerReading,
-            magnetometerReading
-        )
+        val success = SensorManager.getRotationMatrix(rotationMatrix, null, accelerometerReading, magnetometerReading)
         if (success) {
             SensorManager.getOrientation(rotationMatrix, orientationAngles)
             var yawDeg = Math.toDegrees(orientationAngles[0].toDouble()).toFloat()
@@ -187,50 +219,82 @@ class SensorFusionEngine(private val sensorManager: SensorManager) : SensorEvent
             val pitchDeg = Math.toDegrees(orientationAngles[1].toDouble()).toFloat()
             val rollDeg = Math.toDegrees(orientationAngles[2].toDouble()).toFloat()
 
-            currentData = currentData.copy(
-                yaw = yawDeg,
-                pitch = pitchDeg,
-                roll = rollDeg
-            )
+            currentData = currentData.copy(yaw = yawDeg, pitch = pitchDeg, roll = rollDeg)
             notifyUpdate()
         }
     }
 
+    // ========== Linear Acceleration → Velocity → Displacement (double integration) ==========
+
     private fun processLinearAcceleration(values: FloatArray, timestamp: Long) {
-        if (lastTimestamp == 0L) {
-            lastTimestamp = timestamp
+        if (lastAccelTimestamp == 0L) {
+            lastAccelTimestamp = timestamp
             return
         }
-        val dt = (timestamp - lastTimestamp) / 1_000_000_000.0f // seconds
-        lastTimestamp = timestamp
-        if (dt <= 0 || dt > 1.0f) return
+        val dt = (timestamp - lastAccelTimestamp) / 1_000_000_000.0 // seconds
+        lastAccelTimestamp = timestamp
+        if (dt <= 0.0 || dt > 0.5) return // reject garbage deltas
 
-        // Rotate linear acceleration vector into Earth coordinate frame: a_earth = R * a_device
-        val ax = values[0]
-        val ay = values[1]
-        val az = values[2]
+        // Rotate device-frame linear acceleration into Earth frame using rotation matrix
+        val ax = values[0]; val ay = values[1]; val az = values[2]
+        val earthAx = (rotationMatrix[0] * ax + rotationMatrix[1] * ay + rotationMatrix[2] * az).toDouble()
+        val earthAy = (rotationMatrix[3] * ax + rotationMatrix[4] * ay + rotationMatrix[5] * az).toDouble()
+        val earthAz = (rotationMatrix[6] * ax + rotationMatrix[7] * ay + rotationMatrix[8] * az).toDouble()
 
-        val earthAx = rotationMatrix[0] * ax + rotationMatrix[1] * ay + rotationMatrix[2] * az
-        val earthAy = rotationMatrix[3] * ax + rotationMatrix[4] * ay + rotationMatrix[5] * az
-        val earthAz = rotationMatrix[6] * ax + rotationMatrix[7] * ay + rotationMatrix[8] * az
+        // Dead zone filter: suppress sensor noise floor
+        val fAx = if (abs(earthAx) > ACCEL_THRESHOLD) earthAx else 0.0
+        val fAy = if (abs(earthAy) > ACCEL_THRESHOLD) earthAy else 0.0
+        val fAz = if (abs(earthAz) > ACCEL_THRESHOLD) earthAz else 0.0
 
-        // Apply threshold filter for noise suppression
-        val threshold = 0.15f
-        filteredAccelEarth[0] = if (kotlin.math.abs(earthAx) > threshold) earthAx else 0.0f
-        filteredAccelEarth[1] = if (kotlin.math.abs(earthAy) > threshold) earthAy else 0.0f
-        filteredAccelEarth[2] = if (kotlin.math.abs(earthAz) > threshold) earthAz else 0.0f
+        // ZUPT: Zero Velocity Update — if acceleration is negligible for N consecutive samples,
+        // the device is stationary so slam velocity to zero to stop drift accumulation.
+        val accelMag = sqrt(fAx * fAx + fAy * fAy + fAz * fAz)
+        if (accelMag < ZUPT_THRESHOLD) {
+            stationaryCounter++
+            if (stationaryCounter >= ZUPT_SAMPLES) {
+                velocityEarth[0] = 0.0
+                velocityEarth[1] = 0.0
+                velocityEarth[2] = 0.0
+            }
+        } else {
+            stationaryCounter = 0
+        }
 
-        // Instantaneous speed estimate
-        val speed = kotlin.math.sqrt(
-            (filteredAccelEarth[0] * dt).pow(2) + (filteredAccelEarth[1] * dt).pow(2)
-        )
+        // Integrate acceleration → velocity (trapezoidal would be better but euler is fine at high rates)
+        velocityEarth[0] += fAx * dt
+        velocityEarth[1] += fAy * dt
+        velocityEarth[2] += fAz * dt
+
+        // Exponential velocity decay to fight unbounded drift
+        val decay = 0.98
+        velocityEarth[0] *= decay
+        velocityEarth[1] *= decay
+        velocityEarth[2] *= decay
+
+        // Integrate velocity → position
+        positionEarth[0] += velocityEarth[0] * dt
+        positionEarth[1] += velocityEarth[1] * dt
+        positionEarth[2] += velocityEarth[2] * dt
+
+        // Speed for display
+        val speed = sqrt(velocityEarth[0] * velocityEarth[0] + velocityEarth[1] * velocityEarth[1]).toFloat()
         currentData = currentData.copy(currentSpeed = speed)
+
+        // Push integrated displacement (this is ADDITIVE to step-based displacement)
+        updateCoordinates(
+            currentData.deltaX + velocityEarth[0] * dt,
+            currentData.deltaY + velocityEarth[1] * dt,
+            currentData.deltaZ,
+            currentData.stepCount,
+            currentData.totalDistance
+        )
     }
+
+    // ========== Step Detection ==========
 
     private fun processStep() {
         val headingRad = Math.toRadians(currentData.yaw.toDouble())
 
-        // Calculate step vector in East-North plane
         val stepEast = defaultStepLength * sin(headingRad)
         val stepNorth = defaultStepLength * cos(headingRad)
 
@@ -242,17 +306,58 @@ class SensorFusionEngine(private val sensorManager: SensorManager) : SensorEvent
         updateCoordinates(newDeltaX, newDeltaY, currentData.deltaZ, newStepCount, newTotalDistance)
     }
 
+    /**
+     * Software step detector: peak-valley detection on raw accelerometer magnitude.
+     * This fires when there is no hardware TYPE_STEP_DETECTOR available.
+     */
+    private fun detectStepFromAccelerometer(timestamp: Long) {
+        val magnitude = sqrt(
+            accelerometerReading[0] * accelerometerReading[0] +
+            accelerometerReading[1] * accelerometerReading[1] +
+            accelerometerReading[2] * accelerometerReading[2]
+        )
+
+        // Store in ring buffer for smoothing
+        accelMagnitudeHistory[accelHistoryIdx] = magnitude
+        accelHistoryIdx = (accelHistoryIdx + 1) % accelMagnitudeHistory.size
+        if (accelHistoryIdx == 0) accelHistoryFilled = true
+
+        // Need at least a full buffer to detect peaks
+        val count = if (accelHistoryFilled) accelMagnitudeHistory.size else accelHistoryIdx
+        if (count < 5) return
+
+        // Simple moving average for smoothing
+        var sum = 0f
+        for (i in 0 until count) sum += accelMagnitudeHistory[i]
+        val smoothed = sum / count
+
+        // Peak-valley state machine
+        if (!peakDetected && smoothed > STEP_PEAK_THRESHOLD) {
+            peakDetected = true
+        } else if (peakDetected && smoothed < STEP_VALLEY_THRESHOLD) {
+            peakDetected = false
+            // Debounce: enforce minimum time between steps
+            if (timestamp - lastStepTimestamp > MIN_STEP_INTERVAL_NS) {
+                lastStepTimestamp = timestamp
+                processStep()
+            }
+        }
+    }
+
+    // ========== Barometric Altitude ==========
+
     private fun processPressure(pressureHpa: Float) {
         if (referencePressure == null) {
             referencePressure = pressureHpa
             return
         }
         val refP = referencePressure ?: return
-        // Barometric altitude delta formula: h = 44330 * (1 - (P / P0)^(1/5.255))
         val relativeAlt = 44330.0 * (1.0 - (pressureHpa / refP).toDouble().pow(1.0 / 5.255))
 
         updateCoordinates(currentData.deltaX, currentData.deltaY, relativeAlt, currentData.stepCount, currentData.totalDistance)
     }
+
+    // ========== GPS Comparison ==========
 
     fun updatePassiveGpsComparison(gpsLat: Double, gpsLng: Double, gpsAlt: Double, gpsAccuracy: Float) {
         val results = FloatArray(1)
@@ -261,20 +366,19 @@ class SensorFusionEngine(private val sensorManager: SensorManager) : SensorEvent
             gpsLat, gpsLng,
             results
         )
-        val errorMeters = results[0]
-        val verticalError = gpsAlt - currentData.currentAlt
-
         currentData = currentData.copy(
             latestGpsLat = gpsLat,
             latestGpsLng = gpsLng,
             latestGpsAlt = gpsAlt,
             latestGpsAccuracy = gpsAccuracy,
-            errorDistanceMeters = errorMeters,
-            errorVerticalMeters = verticalError,
+            errorDistanceMeters = results[0],
+            errorVerticalMeters = gpsAlt - currentData.currentAlt,
             hasGpsComparison = true
         )
         notifyUpdate()
     }
+
+    // ========== Coordinate Projection ==========
 
     private fun updateCoordinates(
         deltaX: Double,
@@ -285,7 +389,6 @@ class SensorFusionEngine(private val sensorManager: SensorManager) : SensorEvent
     ) {
         val originLatRad = Math.toRadians(currentData.originLat)
 
-        // Conversion factors: ~111,139 meters per degree of Latitude
         val deltaLat = deltaY / 111139.0
         val deltaLng = deltaX / (111139.0 * cos(originLatRad))
 
