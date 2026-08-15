@@ -254,6 +254,28 @@ class SensorFusionEngine(private val sensorManager: SensorManager) : SensorEvent
         updateCoordinates(currentData.deltaX, currentData.deltaY, relativeAlt, currentData.stepCount, currentData.totalDistance)
     }
 
+    fun updatePassiveGpsComparison(gpsLat: Double, gpsLng: Double, gpsAlt: Double, gpsAccuracy: Float) {
+        val results = FloatArray(1)
+        android.location.Location.distanceBetween(
+            currentData.currentLat, currentData.currentLng,
+            gpsLat, gpsLng,
+            results
+        )
+        val errorMeters = results[0]
+        val verticalError = gpsAlt - currentData.currentAlt
+
+        currentData = currentData.copy(
+            latestGpsLat = gpsLat,
+            latestGpsLng = gpsLng,
+            latestGpsAlt = gpsAlt,
+            latestGpsAccuracy = gpsAccuracy,
+            errorDistanceMeters = errorMeters,
+            errorVerticalMeters = verticalError,
+            hasGpsComparison = true
+        )
+        notifyUpdate()
+    }
+
     private fun updateCoordinates(
         deltaX: Double,
         deltaY: Double,
@@ -271,6 +293,19 @@ class SensorFusionEngine(private val sensorManager: SensorManager) : SensorEvent
         val newLng = currentData.originLng + deltaLng
         val newAlt = currentData.originAlt + deltaZ
 
+        var errorDist = currentData.errorDistanceMeters
+        var vertError = currentData.errorVerticalMeters
+        if (currentData.hasGpsComparison) {
+            val results = FloatArray(1)
+            android.location.Location.distanceBetween(
+                newLat, newLng,
+                currentData.latestGpsLat, currentData.latestGpsLng,
+                results
+            )
+            errorDist = results[0]
+            vertError = currentData.latestGpsAlt - newAlt
+        }
+
         currentData = currentData.copy(
             deltaX = deltaX,
             deltaY = deltaY,
@@ -279,7 +314,9 @@ class SensorFusionEngine(private val sensorManager: SensorManager) : SensorEvent
             currentLng = newLng,
             currentAlt = newAlt,
             stepCount = stepCount,
-            totalDistance = totalDistance
+            totalDistance = totalDistance,
+            errorDistanceMeters = errorDist,
+            errorVerticalMeters = vertError
         )
 
         notifyUpdate()

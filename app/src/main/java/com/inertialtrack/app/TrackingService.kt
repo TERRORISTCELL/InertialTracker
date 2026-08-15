@@ -123,19 +123,30 @@ class TrackingService : Service(), SensorFusionEngine.TelemetryListener {
 
     private fun handleNewLocation(location: Location) {
         latestLocation = location
-        broadcastTelemetry(
-            currentPositionData.copy(
-                trackingState = TrackingState.SEARCHING_GPS,
-                originLat = location.latitude,
-                originLng = location.longitude,
-                originAlt = location.altitude,
-                originAccuracy = location.accuracy
-            )
-        )
 
-        // If accuracy is high enough (<= 8 meters), ditch GPS immediately!
-        if (location.accuracy <= 8.0f) {
-            lockGpsAndSwitchToSensors(location)
+        if (currentPositionData.trackingState == TrackingState.SEARCHING_GPS) {
+            broadcastTelemetry(
+                currentPositionData.copy(
+                    trackingState = TrackingState.SEARCHING_GPS,
+                    originLat = location.latitude,
+                    originLng = location.longitude,
+                    originAlt = location.altitude,
+                    originAccuracy = location.accuracy
+                )
+            )
+
+            // If accuracy is high enough (<= 8 meters), lock GPS and start comparison!
+            if (location.accuracy <= 8.0f) {
+                lockGpsAndSwitchToSensors(location)
+            }
+        } else if (currentPositionData.trackingState == TrackingState.SENSOR_TRACKING) {
+            // Continuously update passive GPS ground truth to compare with sensor guess
+            sensorFusionEngine.updatePassiveGpsComparison(
+                location.latitude,
+                location.longitude,
+                location.altitude,
+                location.accuracy
+            )
         }
     }
 
@@ -156,8 +167,9 @@ class TrackingService : Service(), SensorFusionEngine.TelemetryListener {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun lockGpsAndSwitchToSensors(location: Location) {
-        // DITCH GPS COMPLETELY! Unregister all GPS updates.
+        // Unregister high-frequency GPS lock updates
         try {
             fusedLocationClient.removeLocationUpdates(locationCallback)
             locationManager.removeUpdates(locationListener)
@@ -175,17 +187,35 @@ class TrackingService : Service(), SensorFusionEngine.TelemetryListener {
 
         // Switch tracking mode to autonomous background sensor fusion
         sensorFusionEngine.startTracking()
-        updateNotification("GPS Ditched → 3D Sensor Tracking Active")
+
+        // Re-subscribe to background GPS updates for continuous error/drift tracking vs sensor guess
+        val backgroundGpsRequest = LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 3000L)
+            .setMinUpdateIntervalMillis(1500L)
+            .build()
+
+        try {
+            fusedLocationClient.requestLocationUpdates(backgroundGpsRequest, locationCallback, Looper.getMainLooper())
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        updateNotification("Sensor Fusion Active (Comparing vs Live GPS)")
     }
 
     override fun onTelemetryUpdated(data: PositionData) {
         currentPositionData = data
         broadcastTelemetry(data)
-        updateNotification(
+
+        val notificationText = if (data.hasGpsComparison) {
+            "Sensor Error: %.1fm (GPS: ±%.1fm) | Δ(X:%.1f Y:%.1f)".format(
+                data.errorDistanceMeters, data.latestGpsAccuracy, data.deltaX, data.deltaY
+            )
+        } else {
             "3D Delta: X:%.1fm Y:%.1fm Z:%.1fm | Head:%.0f°".format(
                 data.deltaX, data.deltaY, data.deltaZ, data.yaw
             )
-        )
+        }
+        updateNotification(notificationText)
     }
 
     private fun broadcastTelemetry(data: PositionData) {

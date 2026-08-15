@@ -176,6 +176,36 @@ class MainActivity : AppCompatActivity() {
         binding.tvMotionStats.text = "Steps: %d | Distance: %.1f m | Speed: %.2f m/s".format(
             data.stepCount, data.totalDistance, data.currentSpeed
         )
+
+        // Continuous Error Comparison Card
+        if (data.hasGpsComparison) {
+            binding.tvErrorMeters.text = "Error: %.2f meters".format(data.errorDistanceMeters)
+
+            val errorColor = when {
+                data.errorDistanceMeters < 5.0f -> ContextCompat.getColor(this, R.color.status_gps_locked)
+                data.errorDistanceMeters < 15.0f -> ContextCompat.getColor(this, R.color.status_gps_searching)
+                else -> ContextCompat.getColor(this, R.color.status_stopped)
+            }
+            binding.tvErrorMeters.setTextColor(errorColor)
+
+            binding.tvErrorDetails.text = "Horizontal Error: %.2f m | Vertical Error: %.2f m | GPS Acc: ±%.1f m".format(
+                data.errorDistanceMeters,
+                data.errorVerticalMeters,
+                data.latestGpsAccuracy
+            )
+
+            binding.tvGpsVsSensorCoords.text = "Hardware GPS: %.6f, %.6f (Alt: %.1fm)\nSensor Guess:  %.6f, %.6f (Alt: %.1fm)".format(
+                data.latestGpsLat, data.latestGpsLng, data.latestGpsAlt,
+                data.currentLat, data.currentLng, data.currentAlt
+            )
+        } else {
+            binding.tvErrorMeters.text = "Error: Waiting for GPS sample..."
+            binding.tvErrorMeters.setTextColor(ContextCompat.getColor(this, R.color.text_secondary))
+            binding.tvErrorDetails.text = "Horizontal Error: -- m | Vertical Error: -- m | GPS Acc: ±-- m"
+            binding.tvGpsVsSensorCoords.text = "GPS: Waiting for comparison frame\nSensor Guess: %.6f, %.6f".format(
+                data.currentLat, data.currentLng
+            )
+        }
     }
 
     private fun getCardinalDirection(yaw: Float): String {

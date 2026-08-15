@@ -31,5 +31,12 @@ data class PositionData(
     val roll: Float = 0.0f,
     val stepCount: Int = 0,
     val totalDistance: Double = 0.0,
-    val currentSpeed: Float = 0.0f
+    val currentSpeed: Float = 0.0f,
+    val latestGpsLat: Double = 0.0,
+    val latestGpsLng: Double = 0.0,
+    val latestGpsAlt: Double = 0.0,
+    val latestGpsAccuracy: Float = 0.0f,
+    val errorDistanceMeters: Float = 0.0f,
+    val errorVerticalMeters: Double = 0.0,
+    val hasGpsComparison: Boolean = false
 ) : Parcelable
