@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">3D Inertial Tracker</string>
+    <string name="status_idle">System Idle</string>
+    <string name="status_searching_gps">Acquiring High-Precision GPS Lock…</string>
+    <string name="status_gps_locked">GPS Locked (Ditching GPS → Sensor Fusion Active)</string>
+    <string name="status_sensor_tracking">3D Sensor Fusion Tracking Active (Background)</string>
+    <string name="status_stopped">Tracking Stopped</string>
+
+    <string name="btn_lock_gps">Lock GPS &amp; Switch to Sensors</string>
+    <string name="btn_force_lock">Force Instant GPS Fix</string>
+    <string name="btn_reset_origin">Reset 3D Sensor Origin</string>
+    <string name="btn_stop">Stop Service</string>
+
+    <string name="card_title_status">Tracking Mode &amp; Status</string>
+    <string name="card_title_initial_gps">Initial GPS Reference Point</string>
+    <string name="card_title_live_3d">Live 3D Telemetry (Sensors)</string>
+
+    <string name="lbl_lat_lng">Coordinates:</string>
+    <string name="lbl_altitude">Altitude / Floor Delta:</string>
+    <string name="lbl_displacement">3D Displacement (X, Y, Z):</string>
+    <string name="lbl_orientation">Orientation (Yaw, Pitch, Roll):</string>
+    <string name="lbl_step_count">Steps / Distance Traveled:</string>
+    <string name="lbl_gps_accuracy">GPS Accuracy:</string>
+
+    <string name="notification_channel_id">tracking_service_channel</string>
+    <string name="notification_channel_name">3D Inertial Motion Tracking</string>
+    <string name="notification_title">3D World Sensor Tracking Active</string>
+    <string name="notification_text">Following device in 3D space with background sensors.</string>
+</resources>

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Accent Color: Deep Vibrant Sapphire Blue -->
+    <color name="primary">#1A56DB</color>
+    <color name="primary_dark">#1E40AF</color>
+    <color name="primary_light">#EBF5FF</color>
+
+    <!-- Status Colors -->
+    <color name="status_gps_searching">#D97706</color>
+    <color name="status_gps_locked">#059669</color>
+    <color name="status_sensor_active">#2563EB</color>
+    <color name="status_stopped">#DC2626</color>
+
+    <!-- Background & Surface Colors -->
+    <color name="background">#F8FAFC</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="surface_variant">#F1F5F9</color>
+
+    <!-- Text Colors -->
+    <color name="text_primary">#0F172A</color>
+    <color name="text_secondary">#475569</color>
+    <color name="text_tertiary">#94A3B8</color>
+    <color name="text_on_primary">#FFFFFF</color>
+
+    <!-- Borders and Dividers -->
+    <color name="divider">#E2E8F0</color>
+    <color name="card_border">#CBD5E1</color>
+</resources>
